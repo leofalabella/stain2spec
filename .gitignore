@@ -2,4 +2,5 @@ data/raw/
 data/processed/
 ASAP/
 wandb/
-stain2spec/ 
+stain2spec/
+__pycache__/ 

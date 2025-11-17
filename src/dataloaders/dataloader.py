@@ -6,6 +6,49 @@ import os
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import pytorch_lightning as pl
+from PIL import Image
+import datasets
+from typing import Optional, Union, Sequence
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+def hf_image_to_numpy(hf_image):
+    """
+    hf_image can be a dict like {'path': '...', 'bytes': b'...'} or a PIL.Image
+    The huggingface image column is often a PIL.Image or dict with 'path' etc.
+    This function tries common conversions to get HWC np.float32 array in [0,1].
+    """
+    if hf_image is None:
+        raise ValueError("Found None hf_image")
+    # If it's a PIL.Image
+    if hasattr(hf_image, "convert"):
+        img = hf_image.convert("RGB")
+        arr = np.array(img).astype(np.float32) / 255.0
+        return arr
+    # If it's a dict with 'bytes' or 'path' or 'array'
+    if isinstance(hf_image, dict):
+        # Try 'bytes'
+        if "bytes" in hf_image:
+            img = Image.open(io.BytesIO(hf_image["bytes"])).convert("RGB")
+            return np.array(img).astype(np.float32) / 255.0
+        # Try 'path'
+        if "path" in hf_image:
+            img = Image.open(hf_image["path"]).convert("RGB")
+            return np.array(img).astype(np.float32) / 255.0
+        # Try 'array'
+        if "array" in hf_image:
+            arr = np.asarray(hf_image["array"]).astype(np.float32)
+            if arr.max() > 1.0:
+                arr = arr / 255.0
+            return arr
+    # If it's already a numpy array
+    if isinstance(hf_image, (np.ndarray,)):
+        arr = hf_image.astype(np.float32)
+        if arr.max() > 1.0:
+            arr = arr / 255.0
+        return arr
+
+    raise TypeError(f"Unhandled HF image type: {type(hf_image)}")
 
 class HEAFDataset(Dataset):
     def __init__(self, he_dir, af_dir, transform=None):
@@ -46,8 +89,9 @@ class HEAFDataModule(pl.LightningDataModule):
         self.train_dataset = torch.utils.data.Subset(full_dataset, list(range(split)))
         self.val_dataset = torch.utils.data.Subset(
             HEAFDataset(self.he_dir, self.af_dir, transform=A.Compose([
-            A.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5), max_pixel_value=1), ToTensorV2(transpose_mask=True)
-        ])),
+                A.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5), max_pixel_value=1),
+                ToTensorV2(transpose_mask=True)
+            ])),
         list(range(split, len(full_dataset)))
         )
 
@@ -73,10 +117,140 @@ class PairedImageDataset(Dataset):
     
     def __len__(self):
         return len(self.af_paths)
+
+#-------------------- Hugging face dataloaders ----------
+class HFDatasetPair(Dataset):
+    def __init__(self,
+                 ds_a: Union[Dataset, Sequence],
+                 ds_b: Union[Dataset, Sequence],
+                 transform: Optional[A.Compose] = None):
+        # ds_a, ds_b are huggingface datasets.Dataset or simple sequences/lists of images
+        self.ds_a = ds_a
+        self.ds_b = ds_b
+        self.transform = transform
+
+        self._len = min(len(self.ds_a), len(self.ds_b)) # length is the min to avoid index errors
+
+    def __len__(self):
+        return self._len
+    
+    def __getitem__(self, idx):
+        # get HF objects
+        item_a = self.ds_a[idx]
+        item_b = self.ds_b[idx]
+
+        # Common column names: 'image', 'image_file', 'pixel_values' etc.
+        # Try to be permissive:
+        for key in ["image", "img", "file", "image_file", "pixel_values", "array"]:
+            if isinstance(item_a, dict) and key in item_a:
+                hf_img_a = item_a[key]
+                break
+        else:
+            # maybe the dataset returns a PIL directly
+            hf_img_a = item_a
+
+        for key in ["image", "img", "file", "image_file", "pixel_values", "array"]:
+            if isinstance(item_b, dict) and key in item_b:
+                hf_img_b = item_b[key]
+                break
+        else:
+            hf_img_b = item_b
+
+        # convert to HWC numpy float32 in range [0,1]
+        a_np = hf_image_to_numpy(hf_img_a)
+        b_np = hf_image_to_numpy(hf_img_b)
+
+        # Apply albumentations: note albumentations expects images in HWC [0..1] or [0..255]
+        if self.transform:
+            # use same API as before: transform(image=A, mask=B)
+            transformed = self.transform(image=a_np, mask=b_np)
+            a_t = transformed["image"]
+            b_t = transformed["mask"]
+        else:
+            # Convert to tensors C,H,W
+            a_t = torch.tensor(np.transpose(a_np, (2,0,1)), dtype=torch.float32)
+            b_t = torch.tensor(np.transpose(b_np, (2,0,1)), dtype=torch.float32)
+
+        return a_t, b_t
+    
+class HFPairedDataModule(pl.LightningDataModule):
+    def __init__(self,
+                 hf_id: str = "wzhang472/HIT",
+                 split_a_name: str = "trainA",
+                 split_b_name: str = "trainB",
+                 batch_size: int = 8,
+                 train_transform = None,
+                 val_transform=None):
+        super().__init__()
+        self.hf_id = hf_id
+        self.split_a_name = split_a_name
+        self.split_b_name = split_b_name
+        self.batch_size = batch_size
+        self.train_transform = train_transform
+        self.val_transform = val_transform
         
+    def setup(self, stage=None):
+        # Clear HF cache if needed
+        import gc
+        gc.collect()
+        # Load specific zip files directly (more memory efficient)
+        print("Loading PAX5_trainA...")
+        train_a = datasets.load_dataset(
+            self.hf_id, 
+            data_files="HIT/PAX5/PAX5_trainA.zip",
+            split="train"
+        )
+        print("Loading PAX5_trainB...")
+        train_b = datasets.load_dataset(
+            self.hf_id,
+            data_files="HIT/PAX5/PAX5_trainB.zip", 
+            split="train"
+        )
+        print("Loading PAX5_testA...")
+        test_a = datasets.load_dataset(
+            self.hf_id,
+            data_files="HIT/PAX5/PAX5_testA.zip",
+            split="train"
+        )
+        print("Loading PAX5_testB...")
+        test_b = datasets.load_dataset(
+            self.hf_id,
+            data_files="HIT/PAX5/PAX5_testB.zip",
+            split="train"
+        )
+
+        print(f"Train A (H&E): {len(train_a)} images")
+        print(f"Train B (IHC): {len(train_b)} images")
+        print(f"Test A (H&E): {len(test_a)} images")
+        print(f"Test B (IHC): {len(test_b)} images")
+
+        # Build train dataset
+        self.train_dataset = HFDatasetPair(train_a, train_b, transform=self.train_transform)
+        self.val_dataset = HFDatasetPair(test_a, test_b, transform=self.val_transform)
+        
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=False,
+            persistent_workers=False
+            )
+            
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=False,
+            persistent_workers=False
+            )
+
 ## Data augmentation
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
 def get_train_transforms():
     return A.Compose([
         A.HorizontalFlip(p=0.5),
@@ -88,13 +262,6 @@ def get_train_transforms():
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5,0.5,0.5), max_pixel_value=1), # assuming RGB
         ToTensorV2(transpose_mask=True)
     ])
-
-
-# # sanity check
-# dm = HEAFDataModule("data/processed/HE/train", "data/processed/IHC/train", batch_size=4)
-# dm.setup()
-# x, y = next(iter(dm.train_dataloader()))
-# print(x.shape, y.shape)
 
 # visualising data augmented
 import matplotlib.pyplot as plt
@@ -129,12 +296,24 @@ def visualize_augmented_batch(x_batch, y_batch, n=4):
         plt.tight_layout()
         plt.show()
 
-# dm = HEAFDataModule("data/processed/HE/train", "data/processed/IHC/train", batch_size=4, train_transform=get_train_transforms())
-# dm.setup()
-# x_batch, y_batch = next(iter(dm.train_dataloader()))
-# visualize_augmented_batch(x_batch, y_batch, n=4)
-# dm_without_transform = HEAFDataModule("data/processed/HE/train", "data/processed/IHC/train", batch_size=4)
-# dm_without_transform.setup()
-# x_batch, y_batch = next(iter(dm_without_transform.train_dataloader()))
-# for i in range(len(x_batch)):
-#     print(x_batch[i].shape)
+
+#----------------- testing HF datasets ---------
+if __name__ == "__main__":
+    train_transform = get_train_transforms()
+    val_transform = A.Compose([
+        A.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5), max_pixel_value=1),
+        ToTensorV2(transpose_mask=True)
+    ])
+
+    dm = HFPairedDataModule(
+        hf_id="wzhang472/HIT",
+        split_a_name="PAX5_trainA",
+        split_b_name="PAX5_trainB",
+        batch_size=4,
+        train_transform=train_transform,
+        val_transform=val_transform
+    )
+
+    dm.setup()
+    x, y = next(iter(dm.train_dataloader()))
+    print(x.shape, y.shape)

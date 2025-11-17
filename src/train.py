@@ -6,11 +6,11 @@ from models.firstmodel import AFNet, Pix2PixModel
 
 wandb_logger = WandbLogger(project="stain2spec", name='he2ihc-baseline')
 
-model = Pix2PixModel(lambda_L1=100.0, lambda_perceptual=10.0)
+model = Pix2PixModel(lambda_L1=100.0, lambda_perceptual=100.0)
 data = HEAFDataModule('data/processed/HE/train', 'data/processed/IHC/train')
 
 trainer = Trainer(
-    max_epochs=100, 
+    max_epochs=300, 
     logger=wandb_logger,
     accelerator='gpu' if torch.cuda.is_available() else 'cpu',
     devices=1,
