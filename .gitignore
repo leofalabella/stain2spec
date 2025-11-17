@@ -12,6 +12,7 @@ data/external/
 ASAP/
 wandb/
 stain2spec/
+notebooks/
 
 # Python
 __pycache__
