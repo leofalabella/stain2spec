@@ -1,6 +1,57 @@
+# Data
 data/raw/
 data/processed/
+data/interim/
+data/external/
+*.csv
+*.tsv
+*.zip
+*.tar.gz
+
+# Specific folders
 ASAP/
 wandb/
 stain2spec/
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Models & Checkpoints
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+*.pickle
+checkpoints/
+lightning_logs/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WSL specific (if needed)
+*.lnk
