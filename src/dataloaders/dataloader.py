@@ -176,15 +176,11 @@ class HFDatasetPair(Dataset):
 class HFPairedDataModule(pl.LightningDataModule):
     def __init__(self,
                  hf_id: str = "wzhang472/HIT",
-                 split_a_name: str = "trainA",
-                 split_b_name: str = "trainB",
                  batch_size: int = 8,
                  train_transform = None,
                  val_transform=None):
         super().__init__()
         self.hf_id = hf_id
-        self.split_a_name = split_a_name
-        self.split_b_name = split_b_name
         self.batch_size = batch_size
         self.train_transform = train_transform
         self.val_transform = val_transform
@@ -198,13 +194,13 @@ class HFPairedDataModule(pl.LightningDataModule):
         train_a = datasets.load_dataset(
             self.hf_id, 
             data_files="HIT/PAX5/PAX5_trainA.zip",
-            split="train"
+            split="train[:10%]"
         )
         print("Loading PAX5_trainB...")
         train_b = datasets.load_dataset(
             self.hf_id,
             data_files="HIT/PAX5/PAX5_trainB.zip", 
-            split="train"
+            split="train[:10%]"
         )
         print("Loading PAX5_testA...")
         test_a = datasets.load_dataset(
@@ -234,7 +230,7 @@ class HFPairedDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=4,
+            num_workers=0,
             pin_memory=False,
             persistent_workers=False
             )
@@ -244,8 +240,8 @@ class HFPairedDataModule(pl.LightningDataModule):
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=4,
+            shuffle=False,
+            num_workers=0,
             pin_memory=False,
             persistent_workers=False
             )
@@ -307,8 +303,6 @@ if __name__ == "__main__":
 
     dm = HFPairedDataModule(
         hf_id="wzhang472/HIT",
-        split_a_name="PAX5_trainA",
-        split_b_name="PAX5_trainB",
         batch_size=4,
         train_transform=train_transform,
         val_transform=val_transform

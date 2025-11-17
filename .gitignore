@@ -3,4 +3,4 @@ data/processed/
 ASAP/
 wandb/
 stain2spec/
-__pycache__/ 
+__pycache__/
